@@ -524,15 +524,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 
-	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
-	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
-	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
-	sessKey := session.ExtractKey(body)
+	// 会话身份拆成两条互不污染的链：
+	//   - bodySessKey：既有请求体会话键，只供现有 body 粘性 fallback 与上游会话头族派生；
+	//   - stickyKey：优先取常见 harness 的客户端 session header 摘要，仅供账号粘性选号。
+	//
+	// 安全边界：客户端原始 session ID 在 session.ExtractClientSessionKey 内立即 SHA-256
+	// 派生；stickyKey 不进入 ChatMeta、上游 header/body 或日志。没有 session header 时，
+	// stickyKey 完整回落 bodySessKey，因此既有 conversation_id / prompt_cache_key /
+	// 内容派生行为零回归。
+	bodySessKey := session.ExtractKey(body)
+	stickyKey := session.ExtractClientSessionKey(r.Header)
+	if stickyKey == "" {
+		stickyKey = bodySessKey
+	}
 	stickyUID := ""
-	if h.cfg.Session != nil && sessKey != "" {
+	if h.cfg.Session != nil && stickyKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		if uid, ok := h.cfg.Session.ResolveForModel(stickyKey, peek.Model); ok {
 			stickyUID = uid
 		}
 	}
@@ -540,8 +549,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 轮级聚合键：按 body 里最后一条 user 消息派生（同轮内所有上游调用同键，
 	// 换 user 消息换键）。#170 起带会话键的客户端也统一走轮级（对齐官方桌面 CLI
 	// 的 X-Conversation-Request-ID 轮级语义——TraceStartHook 每次 USER_PROMPT_SUBMIT
-	// 清空重生成），故不再限 sessKey=="" 才计算；sessKey 由下方派生处以复合键方式
-	// 入键（防不同会话同轮文本互撞）。
+	// 清空重生成）。上游轮级聚合仍只使用 bodySessKey；客户端 session header 不参与
+	// 任何出站会话头派生（防不同会话同轮文本互撞的既有 body 语义保持不变）。
 	// 必须在下方 prompt.Rewrite 之前取——改写会动 messages 内容，之后取会让键漂移。
 	turnKey := session.TurnKey(body)
 
@@ -566,7 +575,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
-			h.cfg.Session.Unbind(sessKey)
+			h.cfg.Session.Unbind(stickyKey)
 			stickyUID = ""
 		}
 	}
@@ -670,15 +679,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
-	} else if turnKey != "" && sessKey != "" {
-		// 轮级复合键：sessKey 入键防跨会话同轮文本互撞（#170 统一轮级）。
-		chatMeta.ConversationRequestID = session.TurnRequestID(sessKey + ":" + turnKey)
+	} else if turnKey != "" && bodySessKey != "" {
+		// 轮级复合键只使用既有 body 会话键；客户端 session header 严禁参与上游头派生。
+		chatMeta.ConversationRequestID = session.TurnRequestID(bodySessKey + ":" + turnKey)
 	} else if turnKey != "" {
 		// 无会话键客户端：纯轮级键（既有兜底语义不变，存量会话键值零漂移）。
 		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
-	} else if sessKey != "" {
-		// 残留空态兜底（无 user 消息/无可签名内容）：会话级聚合，好于请求级随机。
-		chatMeta.ConversationRequestID = session.RequestIDForKey(sessKey)
+	} else if bodySessKey != "" {
+		// 残留空态兜底（无 user 消息/无可签名内容）：只按既有 body 会话键聚合。
+		chatMeta.ConversationRequestID = session.RequestIDForKey(bodySessKey)
 	} else {
 		// 无会话键也无轮级键：请求级随机（轮转内捕获一次即共享）。
 		chatMeta.ConversationRequestID = session.TurnRequestID("")
@@ -868,8 +877,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if sessKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(sessKey, acct.UID)
+		if stickyKey != "" && h.cfg.Session != nil {
+			h.cfg.Session.Bind(stickyKey, acct.UID)
 		}
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
