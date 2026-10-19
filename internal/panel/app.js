@@ -3529,12 +3529,14 @@ function initBoxFolds() {
   boxes.forEach((box, i) => {
     let h = null;
     for (const el of box.children) { if (el.tagName === 'HEADER') { h = el; break; } }
-    if (!h || h.querySelector('.box-fold')) return;
+    // 已有自有折叠控件的区块（如「积分到期提醒」的 #btnExpFold）不再注入，
+    // 否则标题栏出现两个「收起/展开」。
+    if (!h || h.querySelector('.box-fold') || h.querySelector('#btnExpFold')) return;
     const title = h.querySelector('h3');
     const key = (title ? title.textContent : 'box' + i).trim().slice(0, 40) || ('box' + i);
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'xs ghost box-fold';
+    btn.className = 'xs box-fold'; // 与「检查 / 备注」等标题栏按钮同款，保持颜色与尺寸一致
     const apply = (collapsed) => {
       box.classList.toggle('collapsed', collapsed);
       btn.textContent = collapsed ? '展开' : '收起';

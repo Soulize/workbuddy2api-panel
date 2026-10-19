@@ -604,8 +604,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .rm-row input { flex: 1; }
 
 
-  /* 通用区块折叠（与积分到期提醒同交互） */
-  .box > header .box-fold { margin-left: 8px; }
+  /* 通用区块折叠：按钮走 .xs 同款样式，间距交给 header 的 gap:12px */
   .box.collapsed > *:not(header) { display: none !important; }
   /* 账号池按地区分组的分组标题行 */
   tr.group-row td {
