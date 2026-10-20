@@ -259,13 +259,15 @@ curl -s http://localhost:7863/healthz
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
-> `1.15.0` / `1.15` / `1`（major 别名）语义化版本，三者指向同一 manifest，由 CI 自动生成。
-> PR 仅构建验证、不推送。
+> `X.Y.Z` / `X.Y` / `X`（major 别名）语义化版本，三者指向同一 multi-arch manifest
+> （linux/amd64 + linux/arm64），由 CI 自动生成。PR 仅构建验证、不推送。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
+`docker-compose.yml` 默认直接拉取本仓库 CI 发布的镜像，服务器上**不需要 Go 环境、也不需要本地构建**：
+
 ```bash
-# 1. 克隆
+# 1. 克隆（只需要 compose 文件与配置模板）
 git clone https://github.com/jin66god/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
@@ -273,13 +275,31 @@ cd workbuddy2api-panel
 cp config.example.json config.json
 #    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
-# 3. 启动（首次会构建镜像，约 1-2 分钟）
-docker compose up -d --build
+# 3. 拉取镜像并启动（compose 会按宿主架构拉 amd64 / arm64 对应 manifest）
+docker compose pull
+docker compose up -d
 
 # 4. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
 # {"healthy":0,"total":0,"service":"workbuddy2api"}
 ```
+
+锁定版本（生产推荐，避免 `latest` 随 `main` 漂移）：
+
+```bash
+WB2API_TAG=1.16.2 docker compose up -d   # 版本号以 Releases 最新版为准
+# 或写入 .env 文件：WB2API_TAG=1.16.2
+```
+
+从源码构建（改了代码或要用未发布版本时）：
+
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
+
+> 镜像可见性为 Private 时须先登录：`echo $GITHUB_TOKEN | docker login ghcr.io -u <GitHub用户名> --password-stdin`
+> （token 需 `read:packages` 权限）；仓库页 → Packages → Package settings 可改为 Public 免登录拉取。
 
 启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
 
@@ -926,7 +946,7 @@ http://127.0.0.1:7863/panel/
 
 ### Docker 镜像
 
-多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
+CI 用多阶段 Dockerfile（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）在原生 amd64 / arm64 runner 上分别构建，再合并为一个 multi-arch manifest 推送到 `ghcr.io/jin66god/workbuddy2api-panel`；本地 `docker compose build` 走同一份 Dockerfile。镜像内一次编译全部四个二进制并随镜像分发：
 
 - **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
@@ -997,9 +1017,9 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
+- **发布产物**：每个 `v*` tag 由 CI 构建五平台二进制 Release（附 `checksums.txt`）与 GHCR 双架构镜像（`linux/amd64` + `linux/arm64` 指向同一 manifest）
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **产物校验**：Release 资产用 `sha256sum -c checksums.txt` 校验；镜像架构与 digest 可用 `docker buildx imagetools inspect ghcr.io/jin66god/workbuddy2api-panel:<tag>` 核对
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界
