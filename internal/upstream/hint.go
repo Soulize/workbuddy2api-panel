@@ -69,6 +69,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。
 		return "request content was rejected by content policy; adjust the prompt and retry"
+	case ErrChannelRefused:
+		// 11-128 是请求形态问题：官方客户端要求 messages[0] 为 system 且会话头
+		// 三件套齐全。明确说「不是账号问题」，避免用户误以为号被封而反复换号。
+		return "upstream channel verification rejected this request (11-128); this is a request-shape issue, not an account problem — ensure messages[0].role is system and conversation headers are present"
 	default:
 		// ErrNone/ErrNotFound/ErrServer/ErrBadParams/ErrClient 等未覆盖形态：无 hint。
 		return ""

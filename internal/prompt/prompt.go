@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed defaultprompt.md
@@ -144,6 +145,77 @@ func Append(body []byte, systemPrompt string) []byte {
 	rewritten = append(rewritten, msgs[:insertAt]...)
 	rewritten = append(rewritten, gw)
 	rewritten = append(rewritten, msgs[insertAt:]...)
+	obj["messages"] = rewritten
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// EnsureSystemFirst 保证 messages[0].role == "system" —— 上游渠道校验的硬要求。
+//
+// 2026-10-20 真机实测（国际版）：同一 token、同一 body，只改首条角色：
+//
+//	user      → 400 code=11-128 "first message is not system prompt"
+//	developer → 400 code=11-128 "Illegal API invocation from an unapproved channel"
+//	system    → 200（模型正常回包）
+//
+// passthrough 模式原样透传客户端 body（多数 OpenAI 兼容客户端首条是 user），
+// 于是每次请求都撞 11-128，账号被反复记成「渠道校验拦截」→ 全池冷却，表象即
+// issue #231「国际版账号全部被禁用，但网页还能聊」。这不是账号问题、也不是内容
+// 策略问题：**首条角色本身**属于渠道校验的一环。
+//
+// 处置：
+//   - 首条 developer：就地把 role 改成 system（OpenAI 新规范里它是 system 的别名，
+//     内容逐字保留，不删不并）；
+//   - 首条 user/assistant/tool：在最前补一条 gateway system，其余消息逐字不动；
+//   - 已是 system、messages 缺失/为空、非法 JSON：原样返回（不凭空造对话）。
+//
+// fallback 为补入的 system 内容；空则用 Degraded（与降级重试同一中性提示词）。
+//
+// 与 upstream.normalizeRoles 的分工：本函数在 handler 入口按**首条**兜底、覆盖
+// 全部 realm；normalizeRoles 在 prepareBody 里把所有位置的 developer 归一，且
+// 对不经过 handler 的直接调用方（面板任务/夜猫子）仍然生效。两层都有意保留。
+func EnsureSystemFirst(body []byte, fallback string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body
+	}
+	first, ok := msgs[0].(map[string]any)
+	if !ok {
+		return body
+	}
+	role, _ := first["role"].(string)
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "system":
+		return body // 已是官方形态，零改动。
+	case "developer":
+		// 首条 developer 同样被拒（报的是另一句 unapproved channel）。就地改成
+		// system，内容逐字保留——不删不并，避免改变客户端语义。
+		first["role"] = "system"
+		if out, err := json.Marshal(obj); err == nil {
+			return out
+		}
+		return body
+	}
+	systemPrompt := fallback
+	if systemPrompt == "" {
+		systemPrompt = Degraded
+	}
+	if systemPrompt == "" {
+		return body
+	}
+	rewritten := make([]any, 0, len(msgs)+1)
+	rewritten = append(rewritten, map[string]any{"role": "system", "content": systemPrompt})
+	rewritten = append(rewritten, msgs...)
 	obj["messages"] = rewritten
 	out, err := json.Marshal(obj)
 	if err != nil {

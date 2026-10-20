@@ -55,6 +55,39 @@ func (p *Pool) ClearSessionDead(uid string) {
 	}
 }
 
+// NoteAccountRestricted 记录一次 11140「request illegal」账号限制——不立即禁用。
+//
+// 11140 表示账号被上游限制（异常行为/风控），重登无效、只能在 WorkBuddy 提交
+// 反馈申诉。但单次 11140 也可能来自上游瞬时风控误判，一次就永久杀号会误伤
+// 健康账号。与 NoteSessionDead 同构：连续 accountRestrictedThreshold 次才
+// disableLocked（reason 写明申诉路径），期间只累计。返回 true 表示本次已达
+// 阈值并完成禁用（调用方只负责日志，不需要再调 Disable）。
+func (p *Pool) NoteAccountRestricted(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.accountRestrictedFails++
+	if e.accountRestrictedFails < accountRestrictedThreshold {
+		return false
+	}
+	e.accountRestrictedFails = 0
+	p.disableLocked(e, accountRestrictedReason)
+	return true
+}
+
+// ClearAccountRestricted 清连续 11140 计数——chat 成功（NoteSuccess）或手工
+// 复活（Revive/ReviveDisabled）时调用，证明账号限制已解除。
+func (p *Pool) ClearAccountRestricted(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.accountRestrictedFails = 0
+	}
+}
+
 // ReviveDisabled 人工/端点复活入口：清除 disabled + reason + 连续 12153 计数，
 // 账号回到池子（若无其他冷却/熔断则立即可选，健康检查自然接管）。
 // **不改** Disabled 在选号/状态端点的既有语义：disabled 号依然不参与选号，
@@ -66,6 +99,7 @@ func (p *Pool) ReviveDisabled(uid string) {
 		e.disabled = false
 		e.reason = ""
 		e.sessionDeadFails = 0
+		e.accountRestrictedFails = 0
 		p.dirty.Store(true)
 	}
 }
@@ -89,6 +123,7 @@ func (p *Pool) Revive(uid string) bool {
 	e.softStreak = 0
 	e.modelCooldowns = nil // 模型级限流豁免随冷却一并清（防泄漏到后续账号级限流）
 	e.sessionDeadFails = 0
+	e.accountRestrictedFails = 0
 	e.fails = 0
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
@@ -182,6 +217,7 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.breakerUntil = time.Time{}
 		e.softStreak = 0
 		e.sessionDeadFails = 0
+		e.accountRestrictedFails = 0
 		e.consecutiveFails = 0
 		e.degradeUntil = time.Time{}
 		p.dirty.Store(true)
@@ -604,22 +640,22 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 拷贝一份：List 返回后 JSON 序列化在锁外进行，不能与 NoteModelCost 的
 		// 原地扣减共享底层数组（数据竞争）。
 		CreditsExpiryBuckets: append([]ExpiryBucket(nil), e.expiryBuckets...),
-		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
-		Disabled:                 e.disabled,
-		Paused:                   e.paused,
-		SuccessCount:             e.successCount,
-		ErrTotal:                 e.errTotal,
-		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
-		TokenUsage:               e.tokenUsage,
-		LastSuccessTime:          e.lastSuccess,
-		LastErrTime:              e.lastErr,
-		SoftStreak:               e.softStreak,
-		ModelCosts:               p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:         e.consecutiveFails,
-		DegradeUntil:             e.degradeUntil,
-		InFlight:                 int(e.inFlight.Load()),
-		BreakerFails:             e.fails,
-		BreakerUntil:             e.breakerUntil,
+		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
+		Disabled:             e.disabled,
+		Paused:               e.paused,
+		SuccessCount:         e.successCount,
+		ErrTotal:             e.errTotal,
+		CheckinDone:          e.lastCheckinDay == now.Format("2006-01-02"),
+		TokenUsage:           e.tokenUsage,
+		LastSuccessTime:      e.lastSuccess,
+		LastErrTime:          e.lastErr,
+		SoftStreak:           e.softStreak,
+		ModelCosts:           p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails:     e.consecutiveFails,
+		DegradeUntil:         e.degradeUntil,
+		InFlight:             int(e.inFlight.Load()),
+		BreakerFails:         e.fails,
+		BreakerUntil:         e.breakerUntil,
 	}
 	// Reason / Until 只在冷却或禁用仍生效时透出（issue #171 问题一）：软冷却到期后
 	// until/cool_kind/reason 三个字段仍留在内存与 state.json 里（只有再次冷却、禁用或

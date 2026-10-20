@@ -39,8 +39,14 @@ func TestClassify(t *testing.T) {
 		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
 		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
-		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		{400, `{"code":11-128,"msg":"blocked by security policy"}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
+		// 11-128（通道校验失败）与 11140（账号限制）的 msg 同为 "request illegal"，
+		// 必须按业务码分流：前者是请求级（账号健康），后者才是账号级。
+		{400, `{"code":"11-128","msg":"request illegal","displayTips":{"zh":"渠道校验失败，可能不是从官方客户端发出的"}}`, ErrChannelRefused},
+		{400, `{"code":11-128,"msg":"request illegal"}`, ErrChannelRefused},
+		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		{400, `{"code":"11140","msg":"request illegal"}`, ErrAccountFault},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
 		// ErrBadParams：请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）。

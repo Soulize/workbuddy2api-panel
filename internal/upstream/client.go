@@ -38,6 +38,7 @@ const (
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
 	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
 	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrChannelRefused                // 11-128 request illegal 通道校验失败（上游判定请求不是官方客户端发出）→ 请求级：不罚号、不轮转
 	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
@@ -74,6 +75,8 @@ func (k ErrKind) String() string {
 		return "upstream_busy"
 	case ErrAccountFault:
 		return "account_fault"
+	case ErrChannelRefused:
+		return "channel_refused"
 	case ErrClient:
 		return "client"
 	default:
@@ -138,8 +141,7 @@ func isQueueFullBody(lower string) bool {
 //
 // 定位：这类错误是**账号本身状态**决定的本机故障，不是请求格式、不是临时限流、
 // 也不是内容误报——继续重试只会反复刷上游风控/配额检查，必须把该账号冷却轮换。
-//   - "request illegal"（code 11140）→ 上游 auth/auth_forbidden，账号级授权风控，
-//     需重新 OAuth 登录才能恢复，短冷却只能阻止继续送死。
+//   - "request illegal"（code 11140）→ 上游 auth/auth_forbidden，账号级授权风控。
 //   - code 14017（"trial not activated" / "The trial version is not yet activated"）→
 //     上游 quota/quota_not_activated，register 未完成的试用未激活账号，同样账号级。
 //
@@ -147,10 +149,47 @@ func isQueueFullBody(lower string) bool {
 // is rate-limiting requests."），那种场景必须保持 ErrSoftRate（下方 softRateMarkers
 // 后判定）。故此处只收 msg 关键词 "request illegal"（auth_forbidden 的真实文案）。
 // 14017 文案唯一（无软限流歧义），可安全收录。
+//
+// 同为 "request illegal" 的 11-128（通道校验失败）不靠本词表分类：Classify 在其之前
+// 用 isChannelRefused 按业务码 + 文案双条件分流到 ErrChannelRefused，走不到这里。
 var accountFaultMarkers = []string{
 	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",
+}
+
+// accountRestrictedMsg 是 WorkBuddy 11140 账号限制的正文关键词。
+const accountRestrictedMsg = "request illegal"
+
+// IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的 11140 账号级限制
+// （`{"code":11140,"msg":"request illegal"}`）。必须 code + 文案双条件：
+//   - 只看文案："request illegal" 也出现在 11-128 通道校验失败里（账号健康）；
+//   - 只看 code：11140 也承载模型级限流文案（应归 ErrSoftRate）。
+//
+// 调用方（handler）用它把「账号被上游限制、重登无效、只能申诉」与 14017
+// （register 未完成，可自愈）分开处置。
+func IsAccountRestricted(body string) bool {
+	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return false
+	}
+	// 上游对 11-128 这类业务码存在 `{"code":11-128,...}` 的非标准 JSON 形态
+	// （未加引号），json.Unmarshal 会失败；此时退化为文本出现即认码——11140
+	// 是业务码，出现在 body 里不会是普通文案数字。
+	return hasBusinessCode(body, "11140") || strings.Contains(body, "11140")
+}
+
+// isChannelRefused 报告上游 body 是否为 11-128 通道校验失败
+// （`{"code":"11-128","msg":"request illegal"}`，displayTips 明示「可能不是官方
+// 客户端发送」）。同样是 code + 文案双条件：11-128 还承载内容审核变体
+// （"blocked by security policy"），那条归 ErrContentBlocked，不能按 code 一刀切。
+func isChannelRefused(body string) bool {
+	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return false
+	}
+	// `{"code":11-128,...}`（code 未加引号）是上游真实出现过的非标准形态，
+	// json.Unmarshal 解析失败时 hasBusinessCode 恒 false；退化为文本判码。
+	// 调用方已先要求 body 含 "request illegal"，不会把内容审核的 11-128 误收。
+	return hasBusinessCode(body, "11-128") || strings.Contains(body, "11-128")
 }
 
 // contentBlockedMarkers 内容策略拦截关键词（大小写不敏感子串匹配）。
@@ -552,6 +591,15 @@ func Classify(status int, body string) ErrKind {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
 		}
+	}
+	// WorkBuddy 11-128 / 11140 的 msg 同为 "request illegal"，必须按业务码分流：
+	//   - 11-128 = 通道校验失败（displayTips：可能不是官方客户端发送）→ 账号健康，
+	//     请求级错误，归 ErrChannelRefused（不罚号、不轮转）；
+	//   - 11140 = 账号被上游限制 → 继续走下方 accountFaultMarkers → ErrAccountFault。
+	// 两者都要求 code + 文案双条件：只看文案会把 11-128 误判成封号，
+	// 只看 code 会把 11140 的模型级限流变体误判成账号故障。
+	if isChannelRefused(body) {
+		return ErrChannelRefused
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {

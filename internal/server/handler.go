@@ -754,6 +754,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		body = prompt.Rewrite(body, prompt.Degraded)
 		degradedApplied = true
 	}
+	// 渠道校验兜底：上游要求 messages[0] 必须是 system（首条 user 直接 400
+	// 11-128「first message is not system prompt」，首条 developer 报
+	// unapproved channel）——2026-10-20 真机实测三条对照，见 prompt.EnsureSystemFirst。
+	// custom/append 天然以 system 开头，passthrough 透传客户端消息时可能首条就是
+	// user，故这里统一兜一次。覆盖全部 realm：issue #231 是国际版先收紧，但上游
+	// 国内版同源，CN 侧补一条中性 system 无副作用（本就是官方客户端形态）。
+	body = prompt.EnsureSystemFirst(body, h.cfg.PromptText)
 
 	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
 	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
@@ -920,6 +927,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			}
+			// 11-128 通道校验失败：请求级错误，**不罚号、不轮转**——出站指纹与首条
+			// 角色决定结果，换任何账号都是同一堵墙，轮转只会把同一个错误放大
+			// MaxRotate 倍。上游原文（displayTips 明示「可能不是官方客户端发出」）
+			// 对排查最有价值，原样透传 400。根因（首条非 system / 缺会话头）
+			// 已在请求入口修复，这里只剩兜底观测。
+			if kind == upstream.ErrChannelRefused {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request rejected by upstream channel verification (11-128)"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "channel_refused", msg,
+					h.hintOf(upstream.ErrChannelRefused, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
 			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
@@ -1465,22 +1490,27 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
-		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultMarkers 一致）：
-		//   - "request illegal"（业务码 11-128 / 11140）→ 上游**渠道校验拦截**，不是账号封禁。
-		//     上游 body 自带 displayMsg「请求被拦截，请重新发送」与 displayTips「渠道校验失败，
-		//     可能不是从官方客户端发出的，请用官方客户端重新发送」——上游明示这是可重试的请求级
-		//     拦截。实测该账号凭证/余额/JWT 全部正常，同一套出站头部换健康账号即可 200，换任何
-		//     模型、任何 header 变体都稳定复现，属上游按账号下发的风控标记。历史实现在此处
-		//     Disable，会把仍可用的账号永久踢出池子并要求人工解冻（issue #197）。改为软冷却：
-		//     账号暂时出池、自动轮换，上游解除标记后自愈，绝不永久禁用。
+		// 账号级授权/配额故障按业务码分野（口径与 Classify 的 accountFaultMarkers 一致）：
+		//   - 11140 + "request illegal" → 账号被上游限制（异常行为/风控），重登无效、
+		//     只能在 WorkBuddy 官方渠道提交反馈申诉。连续 accountRestrictedThreshold
+		//     次才硬禁用：单次可能是上游瞬时风控误判，先累计不杀号（与 12153 的
+		//     连续 N 次语义一致），达阈后置 Disabled 并写明申诉路径。
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
-		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
-		if strings.Contains(strings.ToLower(body), "request illegal") {
-			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "channel verification blocked (11-128 request illegal)")
+		// 11-128（通道校验失败）已在 Classify 分流为 ErrChannelRefused，走不到这里。
+		if upstream.IsAccountRestricted(body) {
+			if h.cfg.Pool.NoteAccountRestricted(uid) {
+				log.Printf("WARN: [server] 账号 %s 连续 %d 次 11140 账号限制 → 禁用（需在 WorkBuddy 提交反馈申诉）",
+					logfmt.Label(uid, ""), pool.AccountRestrictedThreshold())
+			}
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+	case upstream.ErrChannelRefused:
+		// 11-128 通道校验失败是**请求级**错误（上游认为请求不是官方客户端发出），
+		// 账号本身健康：不冷却、不熔断、不累计错误计数，也不轮转（见 chat 循环的
+		// ErrChannelRefused 分支：直接透传上游原文回 400）。与 ErrContentBlocked
+		// 同待遇，由调用方决定是否终止轮转。
 	case upstream.ErrServer:
 		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)

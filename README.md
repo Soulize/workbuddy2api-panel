@@ -175,7 +175,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 联网搜索 | `POST /v1/search/messages`，Anthropic Messages 兼容，DSH 等客户端零改动接入 |
 | 原生 tool_calls 还原 | 上游标记文本在客户端未声明 `tools` 时还原为结构化 `tool_calls`（流式 / 非流式） |
 | 推理模型兼容 | DeepSeek 思维链注入、`reasoning_content` 回填、effort 档位降级、`reasoning_text` 剥离 |
-| 会话头三件套 | `X-Conversation-ID` 缺失时生成请求级兜底，避免 `11-128 conversation id missing` |
+| 渠道校验形态 | 首条非 system 自动补 system（`developer` 就地归一）+ 会话头三件套缺失兜底，从源头避免 `11-128 first message is not system prompt` / `conversation id missing` |
+| 出站指纹 | UA 按 realm 分档（CN `WorkBuddy/5.8.3`、global `workbuddy-ai/5.8.4`，CLI `2.161.0`），global chat 补 `X-Private-Data`，对齐官方客户端抓包 |
 | 缓存命中修复 | 补齐 body 级 `conversation_id`，修前缀缓存整段未命中 |
 
 ### 账号池与稳定性
@@ -186,7 +187,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | 模型黑名单 | `models.hidden`：列表过滤 + 点名调用 400，热生效 |
 | 11158 / 11102 区分 | 账号类型无权限与模型不存在分别避让；模型锁按 realm 隔离；全池无权限返回 400 而非 503 |
 | 6021 queue.full | 渠道级容量满载：不罚号、不轮转，末端 `503 upstream_busy` |
-| 11140 request illegal | 渠道校验拦截改为软冷却，不再永久禁用账号 |
+| 11-128 / 11140 分流 | 11-128 通道校验失败是请求级错误：不罚号、不冷却、不轮转，原样透传 400；11140 账号限制连续 3 次才禁用并提示在 WorkBuddy 申诉 |
 | refresh 单飞 | 同账号并发 refresh 复用首个结果，避免 RT 反重放撞 `12153` 掉登录 |
 | 出站网络 | `dns_servers` 指定解析器；`HTTP(S)_PROXY` 环境变量自动生效；`cn.chat_base` 支持海外出口改用 `www.workbuddy.cn` |
 | 错误处置 | 12153 连续计数才禁用、404 短冷却、402 硬冷却至次日 04:00、连败降权、积分保底 |
