@@ -25,6 +25,9 @@ var defaultPrompt string
 // system 来源的误报，不改变用户指令的合法性语义。
 const Degraded = "You are a helpful assistant. Respond in the user's language, follow the user's instructions, and be direct and concise."
 
+// DefaultHarnessIdentity 是身份首句替换功能的默认值，开关缺省关闭。
+const DefaultHarnessIdentity = "You are CodeBuddy Code."
+
 // Load 按 mode 与 file 加载系统提示词文本。
 //   - file 非空 → 读文件（不存在/读失败返回 error，调用方 fail fast）；
 //   - file 空 → 返回内置 defaultPrompt。
@@ -153,7 +156,107 @@ func Append(body []byte, systemPrompt string) []byte {
 	return out
 }
 
-// EnsureSystemFirst 保证 messages[0].role == "system" —— 上游渠道校验的硬要求。
+// OverrideHarnessIdentity 仅在开头连续的 system/developer 消息中，寻找以
+// "You are " 开头的第一句身份声明并替换；其余提示词内容、消息顺序及其他字段保留。
+// 仅供 passthrough/append 模式按需调用；无命中时原样返回（不重新序列化）。
+func OverrideHarnessIdentity(body []byte, replacement string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if strings.TrimSpace(replacement) == "" {
+		replacement = DefaultHarnessIdentity
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return body
+	}
+	for _, raw := range msgs {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			break
+		}
+		role, _ := msg["role"].(string)
+		if role != "system" && role != "developer" {
+			break // 不触碰对话中段及 user/assistant/tool 的内容
+		}
+
+		switch content := msg["content"].(type) {
+		case string:
+			updated, changed := replaceHarnessIdentitySentence(content, replacement)
+			if !changed {
+				continue
+			}
+			msg["content"] = updated
+		case []any:
+			// OpenAI 多模态形式：只检查首个文本块，不改动其他块。
+			changed := false
+			for _, rawPart := range content {
+				part, ok := rawPart.(map[string]any)
+				if !ok || part["type"] != "text" {
+					break
+				}
+				text, ok := part["text"].(string)
+				if !ok {
+					break
+				}
+				updated, didChange := replaceHarnessIdentitySentence(text, replacement)
+				if didChange {
+					part["text"] = updated
+					changed = true
+				}
+				break
+			}
+			if !changed {
+				continue
+			}
+		default:
+			continue
+		}
+
+		out, err := json.Marshal(obj)
+		if err != nil {
+			return body
+		}
+		return out // 仅替换找到的第一处声明
+	}
+	return body
+}
+
+// replaceHarnessIdentitySentence 识别英文 harness 常见的 "You are ..." 首句。
+// 以句末标点（后接空白/结尾）或换行作为边界；不把 v4.1 等词内句点当句尾。
+// 保留前导空白、句尾之后的所有文本及原有换行。非身份首句不动。
+func replaceHarnessIdentitySentence(text, replacement string) (string, bool) {
+	start := len(text) - len(strings.TrimLeft(text, " \t\r\n\ufeff"))
+	const prefix = "You are "
+	if len(text)-start < len(prefix) || !strings.EqualFold(text[start:start+len(prefix)], prefix) {
+		return text, false
+	}
+	end := len(text)
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '\r', '\n':
+			end = i
+			goto replace
+		case '.', '!', '?':
+			if i+1 == len(text) || strings.ContainsRune(" \t\r\n", rune(text[i+1])) {
+				end = i + 1
+				goto replace
+			}
+		}
+	}
+replace:
+	if text[start:end] == replacement {
+		return text, false
+	}
+	return text[:start] + replacement + text[end:], true
+}
+
+// EnsureSystemFirst 保证 messages[0].role == "system" —— 上游渠道校验的硬要求.
 //
 // 2026-10-20 真机实测（国际版）：同一 token、同一 body，只改首条角色：
 //

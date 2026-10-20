@@ -66,7 +66,9 @@
   },
   "prompt": {
     "mode": "passthrough",
-    "file": ""
+    "file": "",
+    "identity_override_enabled": false,
+    "identity_override_text": "You are CodeBuddy Code."
   },
   "upstash": {
     "url": "",
