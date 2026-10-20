@@ -46,7 +46,7 @@ func TestHarnessIdentityOverrideEndToEnd(t *testing.T) {
 				PromptIdentityOverrideEnabled: tc.enabled,
 				PromptIdentityOverrideText:    "You are CodeBuddy Code.",
 			})
-			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness.\\nKeep the rules."},{"role":"user","content":"hi"}]}`))
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness.\nKeep the rules."},{"role":"user","content":"hi"}]}`))
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			if rec.Code != 200 {

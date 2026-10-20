@@ -843,6 +843,9 @@ const cfgForm = { elements: {
   api_key: mk('secret'),
   user_agent: mk(''),
   prompt_file: mk(''),
+  prompt_mode: mk('append'),
+  prompt_identity_override_enabled: { type: 'checkbox', checked: true },
+  prompt_identity_override_text: mk('You are CodeBuddy Code.'),
   checkin_hours: mk(''),
 }};
 const ctx = {
@@ -857,6 +860,8 @@ const has = (o, k) => Object.prototype.hasOwnProperty.call(o || {}, k);
 process.stdout.write(JSON.stringify([
   has(out.upstream, 'user_agent'), (out.upstream || {}).user_agent,
   has(out.prompt, 'file'), (out.prompt || {}).file,
+  has(out.prompt, 'identity_override_enabled'), (out.prompt || {}).identity_override_enabled,
+  (out.prompt || {}).identity_override_text,
   has(out, 'listen'),
   has(out.schedule, 'checkin_hours'),
   out.api_key
@@ -874,7 +879,7 @@ process.stdout.write(JSON.stringify([
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
 	// [user_agent 已发, 其值, prompt.file 已发, 其值, listen 未发, checkin_hours 未发, api_key]
-	const want = `[true,"",true,"",false,false,"secret"]`
+	const want = `[true,"",true,"",true,true,"You are CodeBuddy Code.",false,false,"secret"]`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
 	}

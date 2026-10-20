@@ -7,7 +7,7 @@ import (
 )
 
 func TestOverrideHarnessIdentityPreservesRest(t *testing.T) {
-	input := []byte(`{"model":"m","messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness.\\n\\nFollow the project rules."},{"role":"developer","content":"Keep tool calls correct."},{"role":"user","content":"You are an AI agent powered by DeepSeek Harness."}]}`)
+	input := []byte(`{"model":"m","messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness.\n\nFollow the project rules."},{"role":"developer","content":"Keep tool calls correct."},{"role":"user","content":"You are an AI agent powered by DeepSeek Harness."}]}`)
 	out := OverrideHarnessIdentity(input, "You are CodeBuddy Code.")
 	var body struct {
 		Model    string `json:"model"`
@@ -67,12 +67,12 @@ func TestOverrideHarnessIdentityNoopGuards(t *testing.T) {
 }
 
 func TestOverrideHarnessIdentityNewlineAndVersion(t *testing.T) {
-	input := []byte(`{"messages":[{"role":"system","content":"You are an agent for v4.1. Keep checking.\\nSecond line"}]}`)
+	input := []byte(`{"messages":[{"role":"system","content":"You are an agent for v4.1. Keep checking.\nSecond line"}]}`)
 	out := OverrideHarnessIdentity(input, "Custom.")
 	if !strings.Contains(string(out), "Custom. Keep checking.") || !strings.Contains(string(out), "Second line") {
 		t.Errorf("first sentence boundary incorrect: %s", out)
 	}
-	line := []byte(`{"messages":[{"role":"system","content":"You are a coding agent\\r\\nFurther rules."}]}`)
+	line := []byte(`{"messages":[{"role":"system","content":"You are a coding agent\r\nFurther rules."}]}`)
 	got := OverrideHarnessIdentity(line, "")
 	if !strings.Contains(string(got), "You are CodeBuddy Code.\\r\\nFurther rules.") {
 		t.Errorf("default identity or CRLF preservation failed: %s", got)

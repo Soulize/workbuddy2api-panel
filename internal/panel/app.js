@@ -1173,6 +1173,8 @@ const CFG_MAP = {
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   cn_chat_base: ['cn', 'chat_base'], models_hidden: ['models', 'hidden'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  prompt_identity_override_enabled: ['prompt', 'identity_override_enabled'],
+  prompt_identity_override_text: ['prompt', 'identity_override_text'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
@@ -1188,13 +1190,25 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'cn_chat_base']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'prompt_identity_override_text', 'cn_chat_base']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
   let o = obj;
   for (let i = 0; i < path.length - 1; i++) { if (typeof o[path[i]] !== 'object' || o[path[i]] === null) o[path[i]] = {}; o = o[path[i]]; }
   o[path[path.length - 1]] = val;
+}
+
+// 覆盖自定义 system 时无客户端身份可替换，暂时禁用此附加选项；
+ // 保留勾选状态，用户切回 passthrough/append 后无需重新设置。
+function updateIdentityOverrideInputs() {
+  const f = $('cfgForm');
+  const allowed = f.elements.prompt_mode.value === 'passthrough' || f.elements.prompt_mode.value === 'append';
+  const enabled = f.elements.prompt_identity_override_enabled;
+  const text = f.elements.prompt_identity_override_text;
+  if (!enabled || !text) return;
+  enabled.disabled = !allowed;
+  text.disabled = !allowed || !enabled.checked;
 }
 
 async function loadConfig() {
@@ -1212,6 +1226,7 @@ async function loadConfig() {
       else el.value = v == null ? (name.startsWith('strategy_') ? 'weighted_random' : '') : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
+    updateIdentityOverrideInputs();
     $('cfgNote').textContent = '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
@@ -1260,6 +1275,11 @@ function markDurationFields() {
 }
 $('cfgForm').addEventListener('input', ev => {
   if (DURATION_FIELDS.includes(ev.target.name)) markDurationFields();
+});
+$('cfgForm').addEventListener('change', ev => {
+  if (ev.target.name === 'prompt_mode' || ev.target.name === 'prompt_identity_override_enabled') {
+    updateIdentityOverrideInputs();
+  }
 });
 $('btnEye').onclick = () => {
   const el = $('cfgKey');
