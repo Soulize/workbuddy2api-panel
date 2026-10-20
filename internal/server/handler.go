@@ -53,8 +53,12 @@ type Config struct {
 
 	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
 	PromptMode string
-	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
+	// PromptText custom/append 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+	// PromptIdentityOverrideEnabled 仅对 passthrough/append 的客户端身份首句生效。
+	PromptIdentityOverrideEnabled bool
+	// PromptIdentityOverrideText 替换后的身份首句（空值使用默认）。
+	PromptIdentityOverrideText string
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
@@ -745,14 +749,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - passthrough / append 非降级期：透传客户端原始 system（append 则再插一条网关 system）。
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
-	degradedApplied := false
+	degradedApplied := (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active()
+	// 先改客户端原始身份首句，再按模式决定是否追加网关提示词。
+	// 降级期会整体换成 Degraded，不保留原始身份声明。
+	if h.cfg.PromptIdentityOverrideEnabled && !degradedApplied &&
+		(h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") {
+		body = prompt.OverrideHarnessIdentity(body, h.cfg.PromptIdentityOverrideText)
+	}
 	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
 		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
+	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !degradedApplied {
 		body = prompt.Append(body, h.cfg.PromptText)
-	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
+	} else if degradedApplied {
 		body = prompt.Rewrite(body, prompt.Degraded)
-		degradedApplied = true
 	}
 	// 渠道校验兜底：上游要求 messages[0] 必须是 system（首条 user 直接 400
 	// 11-128「first message is not system prompt」，首条 developer 报

@@ -66,7 +66,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**：通过
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
 | 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 在途租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
-| 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
+| 💬 **系统提示词体系** | `passthrough`（默认）/ `append` / `custom` 三模式；可选仅替换 Harness 身份首句；遇内容拦截可降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
@@ -427,8 +427,10 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
-| `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
+| `prompt.mode` | `passthrough` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
+| `prompt.identity_override_enabled` | `false` | 勾选后仅在 passthrough / append 模式覆盖客户端 system/developer 开头的 Harness 身份首句 |
+| `prompt.identity_override_text` | `You are CodeBuddy Code.` | 新的身份首句，可在面板输入；空值恢复默认。身份替换配置修改后需重启 |
 | `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
 | `pool.max_in_flight_global` | `2` | global 域单账号在途上限（国际版 WAF 风控更紧，压低并发） |
@@ -507,9 +509,11 @@ Web 面板「账号池与流量治理」可分别配置策略和账号顺序，�
 
 | 模式 | 语义 |
 |---|---|
-| `custom`（默认） | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 |
+| `custom` | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 |
 | `append` | 开头连续 system / developer 块之后**插入**一条网关自有 system，既有消息（含客户端项目规范/工具约定）逐字不动——两者并用；降级期退化为 replace（带指纹原文重试只会确定性再撞 400） |
-| `passthrough` | 透传客户端原始 system，不做改写 |
+| `passthrough`（默认） | 透传客户端原始 system（若勾选身份首句替换则只改首句） |
+
+可选勾选面板中的「替换 Harness 身份首句」（`prompt.identity_override_enabled=true`），将客户端**开头的 system/developer** 文本中以 `You are ` 起始的身份首句（例如 `You are an AI agent powered by DeepSeek Harness.`）替换为可编辑的 `prompt.identity_override_text`，默认 `You are CodeBuddy Code.`。只影响 `passthrough` 和 `append`，首句之后的项目规范、工具规则和其他消息均保留；`custom` 不使用此选项，降级期仍使用原有的 Degraded 整体替换。配置保存后需重启。
 
 内置默认提示词约 2KB（`internal/prompt/defaultprompt.md`，嵌入二进制）。`prompt.file` 指向自定义提示词文件（自定义人格 / 人设）即整体替换内置默认；**留空 = 内置默认**，路径非空但不可读 → **启动报错**（fail fast，不会静默回落到内置默认）。
 

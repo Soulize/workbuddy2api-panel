@@ -338,8 +338,10 @@ func main() {
 		Live:         live,
 		Usage:        rec,
 		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		PromptMode:                    cfg.Prompt.Mode,
+		PromptText:                    cfg.PromptText,
+		PromptIdentityOverrideEnabled: cfg.Prompt.IdentityOverrideEnabled,
+		PromptIdentityOverrideText:    cfg.Prompt.IdentityOverrideText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -586,6 +588,8 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
+	// prompt 设置由 handler 装配期捕获，面板保存后需重启才会用于新请求。
+	out = append(out, "prompt.mode", "prompt.file", "prompt.identity_override_enabled", "prompt.identity_override_text")
 	return out
 }
 

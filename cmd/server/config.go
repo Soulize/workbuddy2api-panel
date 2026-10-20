@@ -189,6 +189,10 @@ type Config struct {
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
+		// IdentityOverrideEnabled 仅在 passthrough/append 模式替换客户端 harness 身份首句。
+		IdentityOverrideEnabled bool `json:"identity_override_enabled"`
+		// IdentityOverrideText 替换后的首句；空值回落到 "You are CodeBuddy Code."。
+		IdentityOverrideText string `json:"identity_override_text"`
 	} `json:"prompt"`
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
@@ -305,6 +309,7 @@ func Default() *Config {
 	c.Global.Enabled = true
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
+	c.Prompt.IdentityOverrideText = prompt.DefaultHarnessIdentity // 老配置开关缺省 false，不改变现有行为
 	c.Pool.Strategy = pool.RegionStrategies{Domestic: pool.WeightedRandom, International: pool.WeightedRandom}
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
@@ -659,6 +664,9 @@ func (c *Config) normalizePrompt() error {
 		c.Prompt.Mode = "append"
 	default:
 		return fmt.Errorf("prompt.mode: %q 不是合法值（passthrough / custom / append）", c.Prompt.Mode)
+	}
+	if strings.TrimSpace(c.Prompt.IdentityOverrideText) == "" {
+		c.Prompt.IdentityOverrideText = prompt.DefaultHarnessIdentity
 	}
 	if c.Prompt.Mode == "custom" || c.Prompt.Mode == "append" {
 		text, err := prompt.Load(c.Prompt.Mode, c.Prompt.File)
